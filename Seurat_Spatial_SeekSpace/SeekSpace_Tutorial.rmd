@@ -1,0 +1,278 @@
+---
+title: "SeekSpace-会单细胞就会空间转录组"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# 一、基础分析
+
+## 1.1 背景介绍
+
+`seekspace`是寻因公司开发的空转测序平台。关于`SeekSpace`的详细介绍可参考[当空转遇上单细胞\~](https://mp.weixin.qq.com/s?__biz=MzAwMzIzOTk5OQ==&mid=2247505721&idx=1&sn=19d02b3858ebcf483d9e071b8ba00092&chksm=9b3cae69ac4b277f5b90fd75819ac8435226ad6daaf744f367d49ceb8099408e097d48656e2f&token=1236677349&lang=zh_CN#rd)
+
+原理流程图如下： ![](image/image_1.jpg) ![](image/image_2.jpg)
+![](image/image_3.jpg)
+
+简而言之，不同于我们以往介绍的空转建库策略，`SeekSpace`利用的其实是一种反向渗透的原理，通过芯片上标记序列的释放向细胞核内做透化，这样带有标记序列的细胞核可以进一步参与后续的单细胞水平建库。换言之，大家最后拿到的是一套结构近似于单细胞测序的数据。这样更能够无缝的衔接到[Seurat](https://mp.weixin.qq.com/s?__biz=MzAwMzIzOTk5OQ==&mid=2247500516&idx=1&sn=3c0b9de505fcd232054e38b451fa1742&chksm=9b3cbbb4ac4b32a26b61f3a1f7941fff5852d3e6e744ec680aafd0b84ec976a33bf982fb5f79&payreadticket=HNeaBlgHwqYlL4LII2ivonJsty0hf6fDEVnDgLivYXaSonb7m13MeuTY6aCuDDZHQoAQ3wU#rd)或[Scanpy](https://mp.weixin.qq.com/s?__biz=MzAwMzIzOTk5OQ==&mid=2247504877&idx=2&sn=2b56a9cfa19fcc918ee6c2ed88fed017&chksm=9b3caabdac4b23ab6e28425a4a5eb4d40ee3612e51f84f5d1e53ac91bef93f717e9e754398e3&payreadticket=HGF64rY5OHVy0SObeTe5sl-HPukVf33ajBMMx187HIECJ0GDvTNAtar8WEVO85IxpM57-7E#rd)等大家常用的单细胞工具中分析`SeekSpace`平台的数据。
+
+## 1.2 基础分析
+
+### 1.2.1 文件说明
+
+本数据为基于`SeekSpace`技术的⼩⿏（8周龄）脑的空间数据。数据中包含9,333个细胞的单细胞转录组矩阵，空间坐标矩阵和组织DAPI染⾊图⽚。
+
+本文的输入数据结构如下：
+
+├── filtered_feature_bc_matrix
+表达矩阵⽬录，可以使⽤seurat的Read10X命令进⾏读取"三联文件"
+├──barcodes.tsv.gz ├── features.tsv.gz ├── matrix.mtx.gz
+
+├── mouse_brain_aligned_cropped.png 为⼩⿏脑组织切⽚的DAPI染⾊图⽚
+
+├── seurat.ipynb 为使⽤seurat分析该⼩⿏脑空间数据的jupyter示例⽂件
+
+├── spatial_matrix.csv
+为⼩⿏脑测序数据中细胞的空间坐标⽂件。第1列是barcode，顺序与matrix中的filtered_feature_bc_matrix/barcode中细胞的顺序⼀致；第2列和第3列分别为该barcode所代表的细胞的空间位置（即空间芯⽚上的像素坐标）。
+
+SeekSpace技术中一个像素点的大小是约为 0.2653
+微米，将像素点的坐标乘以0.2653 即可转换计算细胞在真实空间上的距离。
+
+### 1.2.2 读入数据并创建对象
+
+这⾥以seurat软件为例，来介绍SeekSpace数据的分析。
+
+具体步骤如下：
+
+第⼀步，读取SeekSpace的矩阵⽂件，并聚类。
+（这⾥的代码可以根据⾃⼰的⽬的进⾏修改，只要是符合seurat分析单细胞转录组的要求即可。）
+这里我们用到的`Seurat`主是`V4`。
+
+```{r,eval=FALSE}
+# 如果你安装的版本不是Seurat V4，可以用以下代码重装
+remove.packages("SeuratObject")
+remove.packages("Seurat")
+
+
+packageurl <- "https://cran.r-project.org/src/contrib/Archive/SeuratObject/SeuratObject_4.1.4.tar.gz" 
+install.packages(packageurl, repos=NULL, type="source")
+
+packageurl <- "https://cran.r-project.org/src/contrib/Archive/Seurat/Seurat_4.4.0.tar.gz" 
+install.packages(packageurl, repos=NULL, type="source")
+
+```
+
+```{r,message=FALSE}
+# 导包
+library(Seurat)
+library(dplyr)
+library(base64enc)
+```
+
+```{r}
+# 读入矩阵：
+mouse_brain.data <- Read10X('./filtered_feature_bc_matrix')  
+# 创建对象：  
+mouse_brain <- CreateSeuratObject(counts=mouse_brain.data,project='mouse_brain')  
+# 查看对象：
+mouse_brain
+```
+
+如上，数据已经被读入并构建为一个`Seurat`对象
+
+### 1.2.3 预处理与聚类
+
+这部分内容与单细胞部分完全一致，这里代码我们就简写了。
+
+```{r}
+# 标准化：   
+mouse_brain <- NormalizeData(mouse_brain, normalization.method = "LogNormalize", scale.factor = 10000) %>%
+# 计算高变基因：
+FindVariableFeatures(selection.method = "vst", nfeatures = 2000) %>%  
+# 归一化数据：
+ScaleData() %>%
+# PCA分析：
+RunPCA() %>%  
+# 构建邻接图：
+FindNeighbors(dims = 1:30) %>%
+# 分群：
+FindClusters(resolution = 0.8) %>%  
+# UMAP降维
+RunUMAP(dims = 1:30)
+```
+
+查看当前的分群情况：
+
+```{r}
+DimPlot(mouse_brain)
+# 这里就和单细胞没差别啦：
+```
+
+### 1.2.4 添加空间坐标
+
+这里需要将细胞的空间信息添加至`Seurat`对象的`metadata`中。这一步看似是`SeekSpace`与单细胞数据分析方式中不同的地方，实则我们介绍过如何在`Seurat`对象中管理注释数据。
+
+```{r}
+# 读入空间矩阵： 
+spatial_df <- read.csv('./spatial_matrix.csv', row.names = 1)
+# 转化为矩阵对象：
+spatial_matrix <- as.matrix(spatial_df)
+# 与metadata的顺序相匹配，防止出现错配：
+spatial_matrix_sorted <- spatial_matrix[match(row.names(mouse_brain@meta.data),row.names(spatial_matrix)), ]
+# 添加至`metadata`中，slot名称为spatial_
+mouse_brain@reductions$spatial <- CreateDimReducObject(embeddings = spatial_matrix_sorted, key='spatial_', assay='RNA')
+```
+
+经过这步处理之后，我们可以在seurat对象中看到一个新的坐标系`spatial`，这个坐标系即为每个细胞在空间位置上的坐标。我们可以看一下整个对象的结构：
+
+```{r }
+if(!require(tidyverse))install.packages("tidyverse")
+if(!require(mindr))devtools::install_github("pzhaonet/mindr")# 这个包需要先安装Rtools
+out2 <- str(mouse_brain)  %>%  
+  capture.output(.) %>% 
+  gsub(
+    pattern = "\\.\\. ",
+    replacement = "#",
+    x = .
+  ) %>% 
+  gsub(
+    pattern = "\\.\\.@",
+    replacement = "# ",
+    x = .
+  ) %>% 
+  gsub(pattern="^\\s+#",replace="#")
+
+if(!require(mindr))install.packages("mindr")
+mindr::mm(
+  from = out2,
+  input_type = "markdown",
+  output_type = "widget",
+  root = "Seurat"
+) 
+```
+
+<iframe src="output/A_widget.html" width="100%" height="400">
+
+</iframe>
+
+### 1.2.5 可视化
+
+`Seurat`当中的很多函数可以直接对这里的对象进行可视化
+
+#### (1)`DimPlot`
+
+```{r,fig.width=6,fig.height=5}
+#简单的DimPlot
+DimPlot(mouse_brain, reduction = 'umap')
+```
+
+```{r,fig.width=10,fig.height=5}
+# 利用空间坐标绘制DimPlot:
+DimPlot(mouse_brain, reduction = 'spatial',pt.size = 1.5)
+```
+
+#### (2)`FeaturePlot`
+
+```{r,fig.width=10,fig.height=10}
+FeaturePlot(mouse_brain, reduction = 'umap', features=c('Mbp','Mobp', 'Olig1','Plp1'), pt.size = 1)
+```
+
+同样，我们可以在使用`FeaturePlot`函数时，将`reduction`参数设置为`spatial`，来查看基因在空间位置上的表达情况。
+
+```{r,fig.width=15,fig.height=15}
+FeaturePlot(mouse_brain, reduction = 'spatial', features = c('Gad2','Hpca','Reln','Pvalb','Mbp'),pt.size = 1.5)
+```
+
+#### (3)带有`Image`信息的可视化
+
+下面我们展示一下在空间数据上添加背景的`DAPI`图片。
+
+```{r}
+# 图片设置：
+img = './mouse_brain_aligned_cropped.png'      
+samplename = 'mouse_brain'
+size_x = 50094
+size_y = 20570
+# 读取图片：
+img_64 = base64enc::dataURI(file = img)
+# 添加图片数据至Seurat对象中：
+mouse_brain@misc$info[[`samplename`]]$img = img_64
+# x方向上的体素极值
+mouse_brain@misc$info[[`samplename`]]$size_x = as.integer(size_x)
+# y方向上的体素极值
+mouse_brain@misc$info[[`samplename`]]$size_y = as.integer(size_y)
+
+```
+
+创建绘图函数：
+
+```{r}
+library(plotly)
+#	添加染色图片
+#   Here, I would like to thank the generous Dr. Zhou Ran.
+
+addBgImage	<-	function(p,	obj,	size_x,	size_y,	base64)	{
+	p_plotly	<-	ggplotly(p)
+	
+		my_layout	<-	list(
+			xaxis	=	list(
+			range	=	c(0,size_x),
+			scaleanchor	=	'y',
+			scaleratio	=	1,
+			tickcolor	=	'gray',
+			showgrid	=	FALSE,
+			visible=	FALSE
+			),
+			yaxis	=	list(
+			range	=	c(0,size_y),
+			ticks	=	'outside',
+			showgrid	=	FALSE,
+			visible=	FALSE
+			),
+			width	=	1000,
+			height	=	600,
+			images	=	list(
+			list(
+			source	=	base64,
+			xref	=	"x",
+			yref	=	"y",
+			sizing	=	'stretch',
+			layer	=	"below",
+			x	=	0,
+			y	=	size_y,
+			sizex	=	size_x,
+			sizey	=	size_y
+			)
+		)
+	)
+	
+	p_plotly$x$layout	<-	my_layout
+	
+	return	(p_plotly)
+}
+```
+
+出图！
+
+```{r}
+p1 = DimPlot(mouse_brain, reduction = 'spatial', pt.size = 0.1) + coord_fixed()
+size_x = mouse_brain@misc$info$mouse_brain$size_x 
+size_y = mouse_brain@misc$info$mouse_brain$size_y
+base64 = mouse_brain@misc$info$mouse_brain$img
+p1_with_img = addBgImage(p1, mouse_brain, size_x, size_y, base64)
+options(repr.plot.height=8, repr.plot.width=10)
+p1_with_img
+```
+
+这是张"活"图哦，大家可以自行探索一下功能：
+
+![](image/SeekSpace%2000_00_00-00_00_30.gif)
+
+# 本教程使用的演示环境：
+
+```{r}
+# 需要保证各软件版本一致才不会报错哦
+sessionInfo()
+```

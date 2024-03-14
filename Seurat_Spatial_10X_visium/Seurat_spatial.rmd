@@ -1,0 +1,413 @@
+---
+title: "Seurat空间转录组分析流程"
+date: "`r Sys.Date()`"
+output: openintro::lab_report
+---
+
+# 一、简介  
+`Seurat`在单细胞领域可谓是家喻户晓。而在2022发布`Seurat_Version 3.2`之后，这一神器开始支持空间转录组数据的分析。**satijalab**yyds！  
+在正式的数据分析之前，你需要先安装以下R包：  
+```{r,message=FALSE}
+if(!require(Seurat))install.packages(Seurat)
+packageVersion('Seurat') # 确保自己的版本>3.2，但我们不推荐安装SeuratV5
+if(!require(SeuratData))devtools::install_github('satijalab/seurat-data')
+if(!require(ggplot2))install.packages(ggplot2)
+if(!require(patchwork))install.packages(patchwork)
+if(!require(dplyr))install.packages(dplyr)
+
+```
+  
+如果你有R包安装失败，看一看你的R语言以及R包版本与我是否一致：  
+```{r}
+sessionInfo()
+```
+
+  
+  
+# 二、10X Visium  
+## 2.1 数据  
+### 2.1.1 测试数据下载  
+作者在开发`Seurat`时以`10X Visum`的数据作为测试数据，并且表示日后会支持` SLIDE-Seq`,`STARmap`,`MERFISH`等数据的分析，感兴趣的同学可以用不同的数据试一试。  
+这里我们按照作者的推荐用来自小鼠脑部切片的`Visium v1 chemistry`数据。  
+```{r,eval=FALSE}
+InstallData("stxBrain")
+brain <- LoadData("stxBrain", type = "anterior1")
+```
+数据稍微有些大，不能科学上网的同学可以下起来比较麻烦，我给大家准备好了测试数据，直接读入即可：  
+```{r,eval=FALSE}
+download.file('http://seurat.nygenome.org/src/contrib/stxBrain.SeuratData_0.1.1.tar.gz','testdata/stxBrain.SeuratData_0.1.1.tar.gz')
+install.packages("./stxBrain.SeuratData_0.1.1.tar.gz", repos = NULL, type = "source")
+
+```
+  
+从本地载入：  
+```{r}
+library(stxBrain.SeuratData)
+brain <- LoadData("stxBrain", type = "anterior1")
+```
+
+  
+### 2.2.2 数据结构  
+```{r,eval=FALSE}
+class(brain)
+```
+得到的数据包含：  
+  
+> 基因表达矩阵(`brain@assays$Spatial`是splot水平的矩阵而非单细胞)  
+> HE组织切片的图像(`brain@images`)  
+> 原始高分辨率图像的缩放/比例因子 
+  
+详细的数据结构框架可以看这里：  
+```{r}
+if(!require(tidyverse))install.packages("tidyverse")
+
+out <- str(brain)  %>%  
+  capture.output(.) %>% 
+  gsub(
+    pattern = "\\.\\. ",
+    replacement = "#",
+    x = .
+  ) %>% 
+  gsub(
+    pattern = "\\.\\.@",
+    replacement = "# ",
+    x = .
+  ) %>% 
+  gsub(pattern="^\\s+#",replace="#")
+
+if(!require(mindr))install.packages("mindr")
+mindr::mm(
+  from = out,
+  input_type = "markdown",
+  output_type = "widget",
+  root = "Seurat"
+)
+```
+  
+## 2.2、数据分析  
+### 2.2.1 标准化  
+对于表达矩阵的处理与单细胞部分非常类似：  
+  
+与单细胞数据一样，空间转录组也可以通过`nCount`来判断数据质量，可以看到某些区域的`nCount_Spatial`会显著高于其它区域。当然，这可能是由于测序偏差引起的，也可能是由于组织异质性导致的，例如大脑中皮质白质部分就会处于低`nCount`状态。  
+```{r}
+plot1 <- VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+```
+  
+  
+由于`nCounts`可能在不同区域、不同细胞中呈现出不同，这时通过`normalizition`来让各基因的表达量处于同一起跑线就显得十分必要。这里作者推荐通过`SCTransform()`来执行标准化的操作，这种方法能够矫正测序介入的干扰并保留表达量中的生物学变量。  
+```{r}
+names(brain@assays)#仅有"Spatial"一个矩阵
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+names(brain@assays)#多出了一个SCT的矩阵
+```
+当然，原来的`NormalizeData()`依旧可以用：  
+```{r}
+brain <- NormalizeData(brain, verbose = FALSE, assay = "Spatial")
+```
+  
+  
+比较一下`SCTransform()`和`NormalizeData()`的结果分别与原count的相关性：  
+计算`brain@assays$Spatial@counts`与`brain@assays$Spatial@data`之间的相关性：  
+```{r}
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "Spatial", slot = "data", do.plot = FALSE)
+```
+  
+  
+计算`brain@assays$SCT@counts`与`brain@assays$SCT@scale.data`之间的相关性：  
+```{r}
+brain <- GroupCorrelation(brain, group.assay = "Spatial", assay = "SCT", slot = "scale.data", do.plot = FALSE)
+```
+  
+  
+可视化：  
+```{r}
+p1 <- GroupCorrelationPlot(brain, assay = "Spatial", cor = "nCount_Spatial_cor") + ggtitle("Log Normalization") +
+    theme(plot.title = element_text(hjust = 0.5))
+p2 <- GroupCorrelationPlot(brain, assay = "SCT", cor = "nCount_Spatial_cor") + ggtitle("SCTransform Normalization") +
+    theme(plot.title = element_text(hjust = 0.5))
+p1 + p2
+```
+  
+  
+### 2.2.2 基因表达量可视化  
+对应单细胞的`FeaturePlot()`，空间转录组的数据可以用`SpatialFeaturePlot()`在玻片的原有位置上绘制出基因的表达量，从而帮助大家更好的判断细胞类型。例如，下图的Hpca是hippocampus的marker，Ttr则是choroid plexus的marker。 
+  
+```{r}
+SpatialFeaturePlot(brain, features = c("Hpca", "Ttr"))
+```
+  
+  
+当然，你如果觉得基因的表达量掩盖了HE染色的图层，可以通过调整`pt.size.factor`(默认为1.6)与`alpha`(默认为c(1,1)即c(低表达基因透明度,高表达量基因透明度))  
+```{r}
+p1 <- SpatialFeaturePlot(brain, features = "Ttr", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(brain, features = "Ttr", pt.size.factor = 0.1)
+p3 <- SpatialFeaturePlot(brain, features = "Ttr", alpha = c(0.1, 1))
+
+
+p1 + p2 + p3#大家更喜欢哪一种呢
+```
+
+  
+  
+### 2.2.3 降维、聚类、可视化  
+降维的内容基本与单细胞测序部分一致，不熟悉这一块内容的同学还是建议去看一下这个视频:[单样本分析](https://www.bilibili.com/video/BV1S44y1b76Z?p=4&vd_source=6335356a0d3631ad476b7c7de83892db)。 
+  
+```{r}
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, verbose = FALSE)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+```
+  
+  
+聚类结果可视化：  
+```{r}
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p1 + p2
+```
+  
+  
+这时每个cluster单独高亮的可视化就变得有趣了起来：  
+```{r}
+SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(2, 1, 4, 3,
+    5, 8)), facet.highlight = TRUE, ncol = 3)
+```
+  
+  
+### 2.2.4 交互式可视化  
+上述提到的`SpatialDimPlot()`与`SpatialFeaturePlot()`均能够提供可交互式的可视化。  
+```{r,eval=FALSE}
+SpatialDimPlot(brain, interactive = TRUE)
+```
+  
+  
+```{r,eval=FALSE}
+SpatialFeaturePlot(brain, features = "Ttr", interactive = TRUE)
+```
+  
+```{r,eval=FALSE}
+LinkedDimPlot(brain)
+```
+  
+  
+### 2.2.5 计算空间高变基因  
+计算空间特异性基因有两种策略: 
+(1) 3.5.1 按照预先注释的解剖学区域进行计算  
+通常就是直接计算一些cluster之间的marker，与单细胞部分内容计算方式几乎一样：  
+```{r}
+de_markers <- FindMarkers(brain, ident.1 = 5, ident.2 = 6)
+SpatialFeaturePlot(object = brain, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+```
+
+(2) 通过空间坐标计算  
+利用`markvariogram`算法可以在无区域性注释的情况下找到空间特征基因：  
+```{r}
+brain <- FindSpatiallyVariableFeatures(brain, assay = "SCT", features = VariableFeatures(brain)[1:1000],
+    selection.method = "markvariogram")
+```
+  
+看一下空间marker的部分可视化：  
+```{r}
+top.features <- head(SpatiallyVariableFeatures(brain, selection.method = "markvariogram"), 6)
+SpatialFeaturePlot(brain, features = top.features, ncol = 3, alpha = c(0.1, 1))
+```
+  
+  
+### 2.2.6 取出特定的解剖学区域  
+相较于单细胞测序部分只能按照特定的cluster来分析数据，空间转录组的利好是能够划分特定的解剖学区域来分析数据。例如这里，作者就成功取出了**cortical cells**进行下游分析。  
+
+```{r}
+#先取出对应cluster
+cortex <- subset(brain, idents = c(1, 2, 3, 4, 6, 7))
+SpatialDimPlot(cortex)
+
+#或者在对应的坐标中筛选细胞，这里的anterior1_imagerow即cortex@images$anterior1@coordinates$imagerow；anterior1_imagecol即cortex@images$anterior1@coordinates$imagerow
+cortex <- subset(cortex, anterior1_imagerow > 400 | anterior1_imagecol < 150, invert = TRUE)
+SpatialDimPlot(cortex)
+cortex <- subset(cortex, anterior1_imagerow > 275 & anterior1_imagecol > 370, invert = TRUE)
+SpatialDimPlot(cortex)
+cortex <- subset(cortex, anterior1_imagerow > 250 & anterior1_imagecol > 440, invert = TRUE)
+SpatialDimPlot(cortex)
+```
+  
+即使是取过子集的数据，也可以直接展示拨片的全貌：  
+```{r}
+p2 <- SpatialDimPlot(cortex, crop = FALSE, label = TRUE, pt.size.factor = 1, label.size = 3)
+p1 + p2
+```
+  
+  
+当然你也可以只展示你所选择的那部分
+```{r}
+p1 <- SpatialDimPlot(cortex, crop = TRUE, label = TRUE)
+
+```
+
+### 2.2.7 与单细胞数据的整合  
+  
+本教程演示的`10X Visum`数据的分辨率大约为**50μm**这意味着每个spot中包含多个细胞(通常为2~10个)。考虑到单细胞的分辨率更高，所以`10X Visium`的空间转录组可以通过单细胞转录组测序的数据进行去卷积(decovonlution)。这里作者使用的是一个成年小鼠皮质细胞的`SMART-Seq2`的数据，大约包含14,000个细胞。这里的整合也是使用锚定+传递标签注释的方式，不熟悉这两块内容的同学可以看一下[多样本整合](https://mp.weixin.qq.com/s?__biz=MzAwMzIzOTk5OQ==&mid=2247488539&idx=1&sn=73c538e31907b8d82437cc063b2a2a15&chksm=9b3f6d4bac48e45dcc737ee5a7529f58803fdbaa9ef49aca3c76af0f2e7e374247266b0d16cb&scene=21#wechat_redirect)与[细胞类型注释](https://mp.weixin.qq.com/s?__biz=MzAwMzIzOTk5OQ==&mid=2247488597&idx=1&sn=6123d348db245774d4a0db4134a839d4&chksm=9b3f6d05ac48e4132f92ca6c32dab29d2a4e1eb00d1db3b6e10eba7ffc7154e8554a70938583&scene=21#wechat_redirect)  
+
+```{r,eval=FALSE}
+下载链接，是上传在Dropbox上的，需要用浏览器打开下载：
+https://www.dropbox.com/s/cuowvm4vrf65pvq/allen_cortex.rds?dl=1','./allen_cortex.rds
+```
+这里已经替大家下载好了：  
+```{r}
+allen_reference <- readRDS("testdata/allen_cortex.rds")
+```
+  
+对单细胞测序数据的预处理：  
+```{r}
+library(dplyr)
+allen_reference <- SCTransform(allen_reference, ncells = 3000, verbose = FALSE) %>%
+    RunPCA(verbose = FALSE) %>%
+    RunUMAP(dims = 1:30)
+DimPlot(allen_reference, group.by = "subclass", label = TRUE)
+```
+  
+  
+空间转录组数据在取过子集后需要重新进行标准化与降维：  
+```{r}
+# After subsetting, we renormalize cortex
+cortex <- SCTransform(cortex, assay = "Spatial", verbose = FALSE) %>%
+    RunPCA(verbose = FALSE)
+
+```
+  
+  
+开始整合：  
+```{r}
+anchors <- FindTransferAnchors(reference = allen_reference, query = cortex, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = allen_reference$subclass, prediction.assay = TRUE,
+    weight.reduction = cortex[["pca"]], dims = 1:30)
+cortex[["predictions"]] <- predictions.assay
+```
+
+整合完成后可以展示每种细胞的"预测分值"  
+```{r}
+DefaultAssay(cortex) <- "predictions"
+SpatialFeaturePlot(cortex, features = c("L2/3 IT", "L4"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+```
+  
+  
+甚至可以计算每种细胞的"预测分值"是否具有空间特异性：  
+```{r}
+cortex <- FindSpatiallyVariableFeatures(cortex, assay = "predictions", selection.method = "markvariogram",
+    features = rownames(cortex), r.metric = 5, slot = "data")
+top.clusters <- head(SpatiallyVariableFeatures(cortex), 4)
+SpatialPlot(object = cortex, features = top.clusters, ncol = 2)
+```
+  
+  
+可以看出，这几种细胞的空间分布具有较高的特异性：  
+```{r}
+cortex <- FindSpatiallyVariableFeatures(cortex, assay = "predictions", selection.method = "markvariogram",
+    features = rownames(cortex), r.metric = 5, slot = "data")
+top.clusters <- head(SpatiallyVariableFeatures(cortex), 4)
+SpatialPlot(object = cortex, features = top.clusters, ncol = 2)
+```
+  
+  
+### 2.2.8 多玻片数据处理：  
+接着上面的测试数据，我们再读入另一个同样是脑部的测试数据：  
+```{r}
+brain2 <- LoadData("stxBrain", type = "posterior1")
+brain2 <- SCTransform(brain2, assay = "Spatial", verbose = FALSE)
+```
+  
+可以直接进行整合：  
+```{r}
+brain.merge <- merge(brain, brain2)
+```
+  
+RNA矩阵与降维也可以合并处理：  
+```{r}
+DefaultAssay(brain.merge) <- "SCT"
+VariableFeatures(brain.merge) <- c(VariableFeatures(brain), VariableFeatures(brain2))
+brain.merge <- RunPCA(brain.merge, verbose = FALSE)
+brain.merge <- FindNeighbors(brain.merge, dims = 1:30)
+brain.merge <- FindClusters(brain.merge, verbose = FALSE)
+brain.merge <- RunUMAP(brain.merge, dims = 1:30)
+```
+
+降维可视化：  
+```{r}
+#按照样本分开DimPlot一下：  
+DimPlot(brain.merge, reduction = "umap", group.by = c("ident", "orig.ident"))  
+
+#SpatialDimPlot两个样本就无法放在同一张图片里展示啦：
+SpatialDimPlot(brain.merge)
+```
+  
+  
+基因展示同理：  
+```{r}
+SpatialFeaturePlot(brain.merge, features = c("Hpca", "Plp1"))
+```
+  
+  
+# 三、Slide-Seq数据  
+## 3.1 数据  
+```{r,eval=FALSE}
+slide.seq <- LoadData("ssHippo")
+```
+
+  
+防止大家不能科学上网，我也给大家下好了：  
+```{r,eval=FALSE}
+download.file('http://seurat.nygenome.org/src/contrib/ssHippo.SeuratData_3.1.4.tar.gz')
+```
+  
+  
+直接安装并读入即可：  
+```{r}
+install.packages("testdata/ssHippo.SeuratData_3.1.4.tar.gz", repos = NULL, type = "source")
+library(ssHippo.SeuratData)
+slide.seq <- LoadData("ssHippo")
+```
+`nCount`展示，可以发现同样有一些局部区域`nCount`值较高：  
+```{r}
+plot1 <- VlnPlot(slide.seq, features = "nCount_Spatial", pt.size = 0, log = TRUE) + NoLegend()
+slide.seq$log_nCount_Spatial <- log(slide.seq$nCount_Spatial)
+plot2 <- SpatialFeaturePlot(slide.seq, features = "log_nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+```
+## 2.2 数据处理  
+### 2.2.1 标准化、降维、聚类  
+```{r}
+slide.seq <- SCTransform(slide.seq, assay = "Spatial", ncells = 3000, verbose = FALSE)
+slide.seq <- RunPCA(slide.seq)
+slide.seq <- RunUMAP(slide.seq, dims = 1:30)
+slide.seq <- FindNeighbors(slide.seq, dims = 1:30)
+slide.seq <- FindClusters(slide.seq, resolution = 0.3, verbose = FALSE)
+```
+  
+  
+### 2.2.2 可视化  
+与上文`10X Visium`的内容基本没有差别  
+展示分群结果：  
+```{r}
+plot1 <- DimPlot(slide.seq, reduction = "umap", label = TRUE)
+plot2 <- SpatialDimPlot(slide.seq, stroke = 0)
+plot1 + plot2
+```
+  
+  
+展示特定区域：  
+```{r}
+SpatialDimPlot(slide.seq, cells.highlight = CellsByIdentities(object = slide.seq, idents = c(1,
+    6, 13)), facet.highlight = TRUE)
+```
+  
+  
+### 2.2.3 与单细胞数据整合  
+这里作者用的是一个小鼠的hippocampus单细胞转录组数据  
+```{r,eval=FALSE}
+网好的同学可以自行去网页中下载：  
+https://www.dropbox.com/s/cs6pii5my4p3ke3/mouse_hippocampus_reference.rds?dl=0
+#总是下载到最后就停了
+```
+
